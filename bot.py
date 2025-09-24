@@ -873,7 +873,7 @@ async def handle_download(request):
             logger.warning("Missing token or secret key in /download")
             return web.json_response({"error": "Missing token or secret key"}, status=400)
 
-        if secret_key != "my_secret_key":  # Match the C# SecretKey
+        if secret_key != "penisman69":  # Match the C# SecretKey
             logger.warning("Invalid secret key in /download")
             return web.json_response({"error": "Invalid secret key"}, status=401)
 
@@ -930,3 +930,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except Exception as e:
         logger.error(f"Error in main: {e}")
+
