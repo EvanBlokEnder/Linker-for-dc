@@ -1,4 +1,3 @@
-```python
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -610,4 +609,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except Exception as e:
         logger.error(f"Error in main: {e}")
-```
+
