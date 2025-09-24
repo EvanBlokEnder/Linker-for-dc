@@ -32,7 +32,7 @@ DOWNLOAD_URL = "/download"
 ZIP_FILE_PATH = "secure_downloads/app.zip"
 
 # Configurable download base URL (set in .env or fallback to Render)
-DOWNLOAD_BASE_URL = os.getenv("DOWNLOAD_BASE_URL", f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'backend-2-0-9uod.onrender.com')}")
+DOWNLOAD_BASE_URL = os.getenv("DOWNLOAD_BASE_URL", f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'linker-for-dc.onrender.com')}")
 
 # Rate limiting and caching
 roblox_cache: Dict[str, Dict] = {}
@@ -240,11 +240,10 @@ async def invalidate_user_codes(discord_id: str):
 @bot.tree.command(name="link-account", description="Link your account to download the application (Supporter role required).")
 async def link_account(interaction: discord.Interaction):
     try:
-        await interaction.response.defer(ephemeral=True)  # Defer immediately
+        await interaction.response.defer(ephemeral=True)
         discord_id = str(interaction.user.id)
         embed = discord.Embed(color=discord.Color.blue())
 
-        # Check if interaction is expired
         if interaction.is_expired():
             logger.warning(f"Interaction expired for link-account, discord_id {discord_id}")
             embed.title = "❌ Interaction Expired"
@@ -253,7 +252,6 @@ async def link_account(interaction: discord.Interaction):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        # Check if user is in the guild and has Supporter role
         if not has_supporter_role(interaction.user):
             embed.title = "❌ Permission Denied"
             embed.description = f"You need the '{SUPPORTER_ROLE_NAME}' role in this server to use this command."
@@ -271,7 +269,7 @@ async def link_account(interaction: discord.Interaction):
             return
 
         embed.title = "✅ Ready to Generate Code"
-        embed.description = "Run the terminal application to generate a verification code. Then use `/verify-code <code>` to receive the download link."
+        embed.description = "Run the terminal application to generate a verification code. Then use `/verify-code <code>` to receive a token."
         embed.color = discord.Color.green()
         await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"link-account called by discord_id {discord_id} in guild {interaction.guild.id}")
@@ -297,14 +295,13 @@ async def link_account(interaction: discord.Interaction):
         except:
             pass
 
-@bot.tree.command(name="verify-code", description="Verify your code to receive the download link (Supporter role required).")
+@bot.tree.command(name="verify-code", description="Verify your code to receive a token (Supporter role required).")
 async def verify_code(interaction: discord.Interaction, code: str):
-    discord_id = str(interaction.user.id)  # Define early to avoid UnboundLocalError
+    discord_id = str(interaction.user.id)
     try:
-        await interaction.response.defer(ephemeral=True)  # Defer immediately
+        await interaction.response.defer(ephemeral=True)
         embed = discord.Embed(color=discord.Color.blue())
 
-        # Check if interaction is expired
         if interaction.is_expired():
             logger.warning(f"Interaction expired for verify-code, discord_id {discord_id}, code {code}")
             embed.title = "❌ Interaction Expired"
@@ -313,7 +310,6 @@ async def verify_code(interaction: discord.Interaction, code: str):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        # Check if user is in the guild and has Supporter role
         if not interaction.guild:
             embed.title = "❌ Invalid Context"
             embed.description = "This command must be run in a server."
@@ -330,7 +326,6 @@ async def verify_code(interaction: discord.Interaction, code: str):
             logger.info(f"verify-code denied for discord_id {discord_id}: no Supporter role")
             return
 
-        # Verify code
         logger.info(f"Attempting to verify code {code} for discord_id {discord_id}")
         download_token = await verify_code_internal(code, discord_id)
         if not download_token:
@@ -341,13 +336,8 @@ async def verify_code(interaction: discord.Interaction, code: str):
             logger.info(f"verify-code failed for discord_id {discord_id}: invalid or expired code {code}")
             return
 
-        # Generate server-sided download link
-        download_link = f"{DOWNLOAD_BASE_URL}{DOWNLOAD_URL}?token={download_token}"
         embed.title = "✅ Code Verified"
-        embed.description = (
-            f"Download your file here: {download_link}\n"
-            f"This link is valid for 5 minutes. Paste it into the terminal app to download and run the application."
-        )
+        embed.description = f"Your token is: `{download_token}`\nUse this token in the terminal application to download and run the application."
         embed.color = discord.Color.green()
         await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"verify-code successful for discord_id {discord_id}, code {code} in guild {interaction.guild.id}")
@@ -376,11 +366,10 @@ async def verify_code(interaction: discord.Interaction, code: str):
 @bot.tree.command(name="change-account", description="Unlink your current device and link a new one (Supporter role required).")
 async def change_account(interaction: discord.Interaction):
     try:
-        await interaction.response.defer(ephemeral=True)  # Defer immediately
+        await interaction.response.defer(ephemeral=True)
         discord_id = str(interaction.user.id)
         embed = discord.Embed(color=discord.Color.blue())
 
-        # Check if interaction is expired
         if interaction.is_expired():
             logger.warning(f"Interaction expired for change-account, discord_id {discord_id}")
             embed.title = "❌ Interaction Expired"
@@ -389,7 +378,6 @@ async def change_account(interaction: discord.Interaction):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        # Check if user is in the guild and has Supporter role
         if not has_supporter_role(interaction.user):
             embed.title = "❌ Permission Denied"
             embed.description = f"You need the '{SUPPORTER_ROLE_NAME}' role in this server to use this command."
@@ -437,11 +425,10 @@ async def change_account(interaction: discord.Interaction):
 @bot.tree.command(name="link-roblox", description="Link your Roblox account to your Discord account.")
 async def link_roblox(interaction: discord.Interaction, username: str):
     try:
-        await interaction.response.defer(ephemeral=True)  # Defer immediately
+        await interaction.response.defer(ephemeral=True)
         discord_id = str(interaction.user.id)
         embed = discord.Embed(color=discord.Color.blue())
 
-        # Check if interaction is expired
         if interaction.is_expired():
             logger.warning(f"Interaction expired for link-roblox, discord_id {discord_id}")
             embed.title = "❌ Interaction Expired"
@@ -503,11 +490,10 @@ async def link_roblox(interaction: discord.Interaction, username: str):
 @bot.tree.command(name="unlink-roblox", description="Unlink your Roblox account from your Discord account.")
 async def unlink_roblox(interaction: discord.Interaction):
     try:
-        await interaction.response.defer(ephemeral=True)  # Defer immediately
+        await interaction.response.defer(ephemeral=True)
         discord_id = str(interaction.user.id)
         embed = discord.Embed(color=discord.Color.blue())
 
-        # Check if interaction is expired
         if interaction.is_expired():
             logger.warning(f"Interaction expired for unlink-roblox, discord_id {discord_id}")
             embed.title = "❌ Interaction Expired"
@@ -564,11 +550,10 @@ async def unlink_roblox(interaction: discord.Interaction):
 @bot.tree.command(name="claim-roles", description="Claim your roles based on your Roblox gamepasses.")
 async def claim_roles(interaction: discord.Interaction):
     try:
-        await interaction.response.defer(ephemeral=True)  # Defer immediately
+        await interaction.response.defer(ephemeral=True)
         discord_id = str(interaction.user.id)
         embed = discord.Embed(color=discord.Color.blue())
 
-        # Check if interaction is expired
         if interaction.is_expired():
             logger.warning(f"Interaction expired for claim-roles, discord_id {discord_id}")
             embed.title = "❌ Interaction Expired"
@@ -636,11 +621,10 @@ async def claim_roles(interaction: discord.Interaction):
 @app_commands.checks.has_role(ADMIN_ROLE_NAME)
 async def list_linked(interaction: discord.Interaction):
     try:
-        await interaction.response.defer(ephemeral=True)  # Defer immediately
+        await interaction.response.defer(ephemeral=True)
         discord_id = str(interaction.user.id)
         embed = discord.Embed(color=discord.Color.blue())
 
-        # Check if interaction is expired
         if interaction.is_expired():
             logger.warning(f"Interaction expired for list-linked, discord_id {discord_id}")
             embed.title = "❌ Interaction Expired"
@@ -692,12 +676,11 @@ async def list_linked(interaction: discord.Interaction):
 @app_commands.checks.has_role(ADMIN_ROLE_NAME)
 async def force_link(interaction: discord.Interaction, discord_user: discord.User, roblox_username: str):
     try:
-        await interaction.response.defer(ephemeral=True)  # Defer immediately
+        await interaction.response.defer(ephemeral=True)
         discord_id = str(interaction.user.id)
         target_discord_id = str(discord_user.id)
         embed = discord.Embed(color=discord.Color.blue())
 
-        # Check if interaction is expired
         if interaction.is_expired():
             logger.warning(f"Interaction expired for force-link, discord_id {discord_id}")
             embed.title = "❌ Interaction Expired"
@@ -761,12 +744,11 @@ async def force_link(interaction: discord.Interaction, discord_user: discord.Use
 @app_commands.checks.has_role(ADMIN_ROLE_NAME)
 async def admin_unlink(interaction: discord.Interaction, discord_user: discord.User):
     try:
-        await interaction.response.defer(ephemeral=True)  # Defer immediately
+        await interaction.response.defer(ephemeral=True)
         discord_id = str(interaction.user.id)
         target_discord_id = str(discord_user.id)
         embed = discord.Embed(color=discord.Color.blue())
 
-        # Check if interaction is expired
         if interaction.is_expired():
             logger.warning(f"Interaction expired for admin-unlink, discord_id {discord_id}")
             embed.title = "❌ Interaction Expired"
@@ -868,14 +850,9 @@ async def handle_redeem(request):
 async def handle_download(request):
     try:
         token = request.query.get("token")
-        secret_key = request.query.get("penisman69")
-        if not token or not secret_key:
-            logger.warning("Missing token or secret key in /download")
-            return web.json_response({"error": "Missing token or secret key"}, status=400)
-
-        if secret_key != "penisman69":  # Match the C# SecretKey
-            logger.warning("Invalid secret key in /download")
-            return web.json_response({"error": "Invalid secret key"}, status=401)
+        if not token:
+            logger.warning("Missing token in /download")
+            return web.json_response({"error": "Missing token"}, status=400)
 
         for code, data in list(linked_accounts["generated_codes"].items()):
             if data.get("download_token") == token and time.time() < data["expiry"]:
@@ -930,4 +907,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except Exception as e:
         logger.error(f"Error in main: {e}")
-
