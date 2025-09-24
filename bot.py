@@ -93,21 +93,29 @@ def save_linked_accounts():
         logger.error(f"Failed to save linked_accounts.json: {e}")
 
 def is_admin(interaction: discord.Interaction) -> bool:
-    role = discord.utils.get(interaction.guild.roles, name=ADMIN_ROLE_NAME)
-    if role is None:
-        logger.warning(f"Admin role '{ADMIN_ROLE_NAME}' not found in guild {interaction.guild.id}")
+    try:
+        role = discord.utils.get(interaction.guild.roles, name=ADMIN_ROLE_NAME)
+        if role is None:
+            logger.warning(f"Admin role '{ADMIN_ROLE_NAME}' not found in guild {interaction.guild.id}")
+            return False
+        return (role in interaction.user.roles) or (interaction.user.id == OWNER_ID)
+    except AttributeError:
+        logger.warning(f"No guild context for admin check in interaction {interaction.id}")
         return False
-    return (role in interaction.user.roles) or (interaction.user.id == OWNER_ID)
 
 def has_supporter_role(member: discord.Member) -> bool:
-    if not member.guild:
-        logger.warning(f"No guild context for member {member.id}")
+    try:
+        if not member.guild:
+            logger.warning(f"No guild context for member {member.id}")
+            return False
+        role = discord.utils.get(member.guild.roles, name=SUPPORTER_ROLE_NAME)
+        if role is None:
+            logger.warning(f"Supporter role '{SUPPORTER_ROLE_NAME}' not found in guild {member.guild.id}")
+            return False
+        return role in member.roles
+    except AttributeError:
+        logger.warning(f"Invalid member object for supporter role check: {member.id}")
         return False
-    role = discord.utils.get(member.guild.roles, name=SUPPORTER_ROLE_NAME)
-    if role is None:
-        logger.warning(f"Supporter role '{SUPPORTER_ROLE_NAME}' not found in guild {member.guild.id}")
-        return False
-    return role in member.roles
 
 # ------------------- Rate Limited API Calls -------------------
 
@@ -232,15 +240,25 @@ async def invalidate_user_codes(discord_id: str):
 @bot.tree.command(name="link-account", description="Link your account to download the application (Supporter role required).")
 async def link_account(interaction: discord.Interaction):
     try:
+        await interaction.response.defer(ephemeral=True)  # Defer immediately
         discord_id = str(interaction.user.id)
         embed = discord.Embed(color=discord.Color.blue())
+
+        # Check if interaction is expired
+        if interaction.is_expired():
+            logger.warning(f"Interaction expired for link-account, discord_id {discord_id}")
+            embed.title = "❌ Interaction Expired"
+            embed.description = "This interaction has timed out. Please try the command again."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
 
         # Check if user is in the guild and has Supporter role
         if not has_supporter_role(interaction.user):
             embed.title = "❌ Permission Denied"
             embed.description = f"You need the '{SUPPORTER_ROLE_NAME}' role in this server to use this command."
             embed.color = discord.Color.red()
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             logger.info(f"link-account denied for discord_id {discord_id}: no Supporter role")
             return
 
@@ -248,26 +266,52 @@ async def link_account(interaction: discord.Interaction):
             embed.title = "❌ Already Linked"
             embed.description = "Your account is already linked to a device. Use `/change-account` to link a new device."
             embed.color = discord.Color.red()
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             logger.info(f"link-account denied for discord_id {discord_id}: already linked")
             return
 
         embed.title = "✅ Ready to Generate Code"
         embed.description = "Run the terminal application to generate a verification code. Then use `/verify-code <code>` to receive the download link."
         embed.color = discord.Color.green()
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"link-account called by discord_id {discord_id} in guild {interaction.guild.id}")
+    except discord.errors.NotFound as e:
+        logger.error(f"NotFound in link_account for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction not found. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
+    except discord.errors.HTTPException as e:
+        logger.error(f"HTTPException in link_account for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction already acknowledged. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
     except Exception as e:
-        logger.error(f"Error in link_account for discord_id {discord_id}: {e}")
-        embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        logger.error(f"Error in link_account for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
 
 @bot.tree.command(name="verify-code", description="Verify your code to receive the download link (Supporter role required).")
 async def verify_code(interaction: discord.Interaction, code: str):
+    discord_id = str(interaction.user.id)  # Define early to avoid UnboundLocalError
     try:
-        await interaction.response.defer(ephemeral=True)  # Defer to avoid timeout
-        discord_id = str(interaction.user.id)
+        await interaction.response.defer(ephemeral=True)  # Defer immediately
         embed = discord.Embed(color=discord.Color.blue())
+
+        # Check if interaction is expired
+        if interaction.is_expired():
+            logger.warning(f"Interaction expired for verify-code, discord_id {discord_id}, code {code}")
+            embed.title = "❌ Interaction Expired"
+            embed.description = "This interaction has timed out. Please try the command again."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
 
         # Check if user is in the guild and has Supporter role
         if not interaction.guild:
@@ -307,23 +351,50 @@ async def verify_code(interaction: discord.Interaction, code: str):
         embed.color = discord.Color.green()
         await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"verify-code successful for discord_id {discord_id}, code {code} in guild {interaction.guild.id}")
+    except discord.errors.NotFound as e:
+        logger.error(f"NotFound in verify_code for discord_id {discord_id}, code {code}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction not found. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
+    except discord.errors.HTTPException as e:
+        logger.error(f"HTTPException in verify_code for discord_id {discord_id}, code {code}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction already acknowledged. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
     except Exception as e:
-        logger.error(f"Error in verify_code command for discord_id {discord_id}, code {code}: {str(e)}")
-        embed = discord.Embed(title="❌ Error", description="An error occurred while verifying the code. Please try again or contact an admin.", color=discord.Color.red())
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        logger.error(f"Error in verify_code for discord_id {discord_id}, code {code}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="An error occurred while verifying the code. Please try again or contact an admin.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
 
 @bot.tree.command(name="change-account", description="Unlink your current device and link a new one (Supporter role required).")
 async def change_account(interaction: discord.Interaction):
     try:
+        await interaction.response.defer(ephemeral=True)  # Defer immediately
         discord_id = str(interaction.user.id)
         embed = discord.Embed(color=discord.Color.blue())
+
+        # Check if interaction is expired
+        if interaction.is_expired():
+            logger.warning(f"Interaction expired for change-account, discord_id {discord_id}")
+            embed.title = "❌ Interaction Expired"
+            embed.description = "This interaction has timed out. Please try the command again."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
 
         # Check if user is in the guild and has Supporter role
         if not has_supporter_role(interaction.user):
             embed.title = "❌ Permission Denied"
             embed.description = f"You need the '{SUPPORTER_ROLE_NAME}' role in this server to use this command."
             embed.color = discord.Color.red()
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             logger.info(f"change-account denied for discord_id {discord_id}: no Supporter role")
             return
 
@@ -331,7 +402,7 @@ async def change_account(interaction: discord.Interaction):
             embed.title = "❌ No Device Linked"
             embed.description = "You haven't linked a device yet. Use `/link-account` to start the process."
             embed.color = discord.Color.red()
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             logger.info(f"change-account denied for discord_id {discord_id}: no device linked")
             return
 
@@ -339,25 +410,52 @@ async def change_account(interaction: discord.Interaction):
         embed.title = "✅ Device Unlinked"
         embed.description = "Your previous device link has been removed. Run the terminal app to generate a new verification code and use `/verify-code`."
         embed.color = discord.Color.green()
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"change-account successful for discord_id {discord_id} in guild {interaction.guild.id}")
+    except discord.errors.NotFound as e:
+        logger.error(f"NotFound in change_account for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction not found. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
+    except discord.errors.HTTPException as e:
+        logger.error(f"HTTPException in change_account for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction already acknowledged. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
     except Exception as e:
-        logger.error(f"Error in change_account for discord_id {discord_id}: {e}")
-        embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        logger.error(f"Error in change_account for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
 
 @bot.tree.command(name="link-roblox", description="Link your Roblox account to your Discord account.")
 async def link_roblox(interaction: discord.Interaction, username: str):
     try:
-        embed = discord.Embed(color=discord.Color.blue())
-        user_id = await get_roblox_user_id(username)
+        await interaction.response.defer(ephemeral=True)  # Defer immediately
         discord_id = str(interaction.user.id)
+        embed = discord.Embed(color=discord.Color.blue())
 
+        # Check if interaction is expired
+        if interaction.is_expired():
+            logger.warning(f"Interaction expired for link-roblox, discord_id {discord_id}")
+            embed.title = "❌ Interaction Expired"
+            embed.description = "This interaction has timed out. Please try the command again."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        user_id = await get_roblox_user_id(username)
         if not user_id:
             embed.title = "❌ User Not Found"
             embed.description = f"Could not find a Roblox user with the username: `{username}`"
             embed.color = discord.Color.red()
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
         roblox_id_str = str(user_id)
@@ -378,21 +476,51 @@ async def link_roblox(interaction: discord.Interaction, username: str):
             embed.description = f"Successfully linked to Roblox account: `{username}`"
             embed.color = discord.Color.green()
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"link-roblox called by discord_id {discord_id}, username {username}")
+    except discord.errors.NotFound as e:
+        logger.error(f"NotFound in link_roblox for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction not found. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
+    except discord.errors.HTTPException as e:
+        logger.error(f"HTTPException in link_roblox for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction already acknowledged. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
     except Exception as e:
-        logger.error(f"Error in link_roblox for discord_id {discord_id}: {e}")
-        embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        logger.error(f"Error in link_roblox for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
 
 @bot.tree.command(name="unlink-roblox", description="Unlink your Roblox account from your Discord account.")
 async def unlink_roblox(interaction: discord.Interaction):
     try:
+        await interaction.response.defer(ephemeral=True)  # Defer immediately
         discord_id = str(interaction.user.id)
+        embed = discord.Embed(color=discord.Color.blue())
+
+        # Check if interaction is expired
+        if interaction.is_expired():
+            logger.warning(f"Interaction expired for unlink-roblox, discord_id {discord_id}")
+            embed.title = "❌ Interaction Expired"
+            embed.description = "This interaction has timed out. Please try the command again."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
 
         if discord_id in linked_accounts.get("force_linked_users", []):
-            embed = discord.Embed(title="❌ Cannot Unlink", description="This account was force-linked by an admin and cannot be unlinked.", color=discord.Color.red())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            embed.title = "❌ Cannot Unlink"
+            embed.description = "This account was force-linked by an admin and cannot be unlinked."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
         if discord_id in linked_accounts["discord_to_roblox"]:
@@ -402,28 +530,58 @@ async def unlink_roblox(interaction: discord.Interaction):
             del linked_accounts["roblox_to_discord"][roblox_id]
             save_linked_accounts()
 
-            embed = discord.Embed(title="✅ Account Unlinked", color=discord.Color.green())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            embed.title = "✅ Account Unlinked"
+            embed.color = discord.Color.green()
+            await interaction.followup.send(embed=embed, ephemeral=True)
             logger.info(f"unlink-roblox successful for discord_id {discord_id}")
         else:
-            embed = discord.Embed(title="❌ No Account Linked", description="You don't have any Roblox account linked.", color=discord.Color.red())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            embed.title = "❌ No Account Linked"
+            embed.description = "You don't have any Roblox account linked."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+    except discord.errors.NotFound as e:
+        logger.error(f"NotFound in unlink_roblox for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction not found. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
+    except discord.errors.HTTPException as e:
+        logger.error(f"HTTPException in unlink_roblox for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction already acknowledged. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
     except Exception as e:
-        logger.error(f"Error in unlink_roblox for discord_id {discord_id}: {e}")
-        embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        logger.error(f"Error in unlink_roblox for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
 
 @bot.tree.command(name="claim-roles", description="Claim your roles based on your Roblox gamepasses.")
 async def claim_roles(interaction: discord.Interaction):
     try:
-        embed = discord.Embed(color=discord.Color.blue())
+        await interaction.response.defer(ephemeral=True)  # Defer immediately
         discord_id = str(interaction.user.id)
+        embed = discord.Embed(color=discord.Color.blue())
+
+        # Check if interaction is expired
+        if interaction.is_expired():
+            logger.warning(f"Interaction expired for claim-roles, discord_id {discord_id}")
+            embed.title = "❌ Interaction Expired"
+            embed.description = "This interaction has timed out. Please try the command again."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
 
         if discord_id not in linked_accounts["discord_to_roblox"]:
             embed.title = "❌ Not Linked"
             embed.description = "You need to link your Roblox account first using `/link-roblox`!"
             embed.color = discord.Color.red()
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
         roblox_id = linked_accounts["discord_to_roblox"][discord_id]
@@ -450,86 +608,219 @@ async def claim_roles(interaction: discord.Interaction):
             embed.description = "ℹ️ You have no new roles to claim."
             embed.color = discord.Color.blue()
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"claim-roles called by discord_id {discord_id}")
+    except discord.errors.NotFound as e:
+        logger.error(f"NotFound in claim_roles for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction not found. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
+    except discord.errors.HTTPException as e:
+        logger.error(f"HTTPException in claim_roles for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction already acknowledged. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
     except Exception as e:
-        logger.error(f"Error in claim_roles for discord_id {discord_id}: {e}")
-        embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        logger.error(f"Error in claim_roles for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
 
 @bot.tree.command(name="list-linked", description="(Admin) List all linked accounts.")
 @app_commands.checks.has_role(ADMIN_ROLE_NAME)
 async def list_linked(interaction: discord.Interaction):
     try:
+        await interaction.response.defer(ephemeral=True)  # Defer immediately
+        discord_id = str(interaction.user.id)
+        embed = discord.Embed(color=discord.Color.blue())
+
+        # Check if interaction is expired
+        if interaction.is_expired():
+            logger.warning(f"Interaction expired for list-linked, discord_id {discord_id}")
+            embed.title = "❌ Interaction Expired"
+            embed.description = "This interaction has timed out. Please try the command again."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
         if not is_admin(interaction):
-            await interaction.response.send_message("❌ You do not have permission.", ephemeral=True)
+            embed.title = "❌ Permission Denied"
+            embed.description = "You do not have permission to use this command."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            logger.info(f"list-linked denied for discord_id {discord_id}: not admin")
             return
 
         description = ""
         for discord_id, roblox_id in linked_accounts["discord_to_roblox"].items():
             description += f"<@{discord_id}> ➜ `{roblox_id}`\n"
 
-        embed = discord.Embed(title="🔗 Linked Accounts", description=description or "None found.", color=discord.Color.blue())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        logger.info(f"list-linked called by discord_id {str(interaction.user.id)}")
+        embed.title = "🔗 Linked Accounts"
+        embed.description = description or "None found."
+        embed.color = discord.Color.blue()
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        logger.info(f"list-linked called by discord_id {discord_id}")
+    except discord.errors.NotFound as e:
+        logger.error(f"NotFound in list_linked for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction not found. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
+    except discord.errors.HTTPException as e:
+        logger.error(f"HTTPException in list_linked for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction already acknowledged. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
     except Exception as e:
-        logger.error(f"Error in list_linked for discord_id {str(interaction.user.id)}: {e}")
-        embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        logger.error(f"Error in list_linked for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
 
 @bot.tree.command(name="force-link", description="(Admin) Force link a user to a Roblox username.")
 @app_commands.checks.has_role(ADMIN_ROLE_NAME)
 async def force_link(interaction: discord.Interaction, discord_user: discord.User, roblox_username: str):
     try:
+        await interaction.response.defer(ephemeral=True)  # Defer immediately
+        discord_id = str(interaction.user.id)
+        target_discord_id = str(discord_user.id)
+        embed = discord.Embed(color=discord.Color.blue())
+
+        # Check if interaction is expired
+        if interaction.is_expired():
+            logger.warning(f"Interaction expired for force-link, discord_id {discord_id}")
+            embed.title = "❌ Interaction Expired"
+            embed.description = "This interaction has timed out. Please try the command again."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
         if not is_admin(interaction):
-            await interaction.response.send_message("❌ You do not have permission.", ephemeral=True)
+            embed.title = "❌ Permission Denied"
+            embed.description = "You do not have permission to use this command."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            logger.info(f"force-link denied for discord_id {discord_id}: not admin")
             return
 
         user_id = await get_roblox_user_id(roblox_username)
         if not user_id:
-            await interaction.response.send_message("❌ Roblox user not found.", ephemeral=True)
+            embed.title = "❌ Roblox User Not Found"
+            embed.description = f"Could not find a Roblox user with the username: `{roblox_username}`"
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        discord_id = str(discord_user.id)
         roblox_id = str(user_id)
 
-        linked_accounts["discord_to_roblox"][discord_id] = user_id
-        linked_accounts["roblox_to_discord"][roblox_id] = discord_id
-        if discord_id not in linked_accounts["force_linked_users"]:
-            linked_accounts["force_linked_users"].append(discord_id)
+        linked_accounts["discord_to_roblox"][target_discord_id] = user_id
+        linked_accounts["roblox_to_discord"][roblox_id] = target_discord_id
+        if target_discord_id not in linked_accounts["force_linked_users"]:
+            linked_accounts["force_linked_users"].append(target_discord_id)
 
         save_linked_accounts()
-        await interaction.response.send_message(f"✅ Force linked {discord_user.mention} to `{roblox_username}`", ephemeral=True)
-        logger.info(f"force-link called by discord_id {str(interaction.user.id)}, linked {discord_id} to {roblox_username}")
+        embed.title = "✅ Force Linked"
+        embed.description = f"Successfully linked {discord_user.mention} to `{roblox_username}`"
+        embed.color = discord.Color.green()
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        logger.info(f"force-link called by discord_id {discord_id}, linked {target_discord_id} to {roblox_username}")
+    except discord.errors.NotFound as e:
+        logger.error(f"NotFound in force_link for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction not found. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
+    except discord.errors.HTTPException as e:
+        logger.error(f"HTTPException in force_link for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction already acknowledged. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
     except Exception as e:
-        logger.error(f"Error in force_link for discord_id {str(interaction.user.id)}: {e}")
-        embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        logger.error(f"Error in force_link for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
 
 @bot.tree.command(name="admin-unlink", description="(Admin) Unlink a user manually.")
 @app_commands.checks.has_role(ADMIN_ROLE_NAME)
 async def admin_unlink(interaction: discord.Interaction, discord_user: discord.User):
     try:
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ You do not have permission.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)  # Defer immediately
+        discord_id = str(interaction.user.id)
+        target_discord_id = str(discord_user.id)
+        embed = discord.Embed(color=discord.Color.blue())
+
+        # Check if interaction is expired
+        if interaction.is_expired():
+            logger.warning(f"Interaction expired for admin-unlink, discord_id {discord_id}")
+            embed.title = "❌ Interaction Expired"
+            embed.description = "This interaction has timed out. Please try the command again."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        discord_id = str(discord_user.id)
-        if discord_id in linked_accounts["discord_to_roblox"]:
-            roblox_id = str(linked_accounts["discord_to_roblox"][discord_id])
-            del linked_accounts["discord_to_roblox"][discord_id]
+        if not is_admin(interaction):
+            embed.title = "❌ Permission Denied"
+            embed.description = "You do not have permission to use this command."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            logger.info(f"admin-unlink denied for discord_id {discord_id}: not admin")
+            return
+
+        if target_discord_id in linked_accounts["discord_to_roblox"]:
+            roblox_id = str(linked_accounts["discord_to_roblox"][target_discord_id])
+            del linked_accounts["discord_to_roblox"][target_discord_id]
             del linked_accounts["roblox_to_discord"][roblox_id]
-            if discord_id in linked_accounts["force_linked_users"]:
-                linked_accounts["force_linked_users"].remove(discord_id)
+            if target_discord_id in linked_accounts["force_linked_users"]:
+                linked_accounts["force_linked_users"].remove(target_discord_id)
             save_linked_accounts()
-            await interaction.response.send_message(f"✅ Unlinked {discord_user.mention}", ephemeral=True)
-            logger.info(f"admin-unlink successful for discord_id {discord_id}")
+            embed.title = "✅ Unlinked"
+            embed.description = f"Successfully unlinked {discord_user.mention}"
+            embed.color = discord.Color.green()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            logger.info(f"admin-unlink successful for discord_id {target_discord_id}")
         else:
-            await interaction.response.send_message("❌ User is not linked.", ephemeral=True)
+            embed.title = "❌ User Not Linked"
+            embed.description = "This user is not linked to any Roblox account."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+    except discord.errors.NotFound as e:
+        logger.error(f"NotFound in admin_unlink for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction not found. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
+    except discord.errors.HTTPException as e:
+        logger.error(f"HTTPException in admin_unlink for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="Interaction already acknowledged. Please try again.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
     except Exception as e:
-        logger.error(f"Error in admin_unlink for discord_id {str(interaction.user.id)}: {e}")
-        embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        logger.error(f"Error in admin_unlink for discord_id {discord_id}: {str(e)}")
+        try:
+            embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except:
+            pass
 
 # ------------------- Helper Functions -------------------
 
