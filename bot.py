@@ -100,6 +100,9 @@ def is_admin(interaction: discord.Interaction) -> bool:
     return (role in interaction.user.roles) or (interaction.user.id == OWNER_ID)
 
 def has_supporter_role(member: discord.Member) -> bool:
+    if not member.guild:
+        logger.warning(f"No guild context for member {member.id}")
+        return False
     role = discord.utils.get(member.guild.roles, name=SUPPORTER_ROLE_NAME)
     if role is None:
         logger.warning(f"Supporter role '{SUPPORTER_ROLE_NAME}' not found in guild {member.guild.id}")
@@ -178,16 +181,20 @@ async def has_gamepass(user_id: int, gamepass_id: int) -> bool:
 async def verify_code(code: str, discord_id: str) -> Optional[str]:
     try:
         if code not in pending_codes:
-            logger.warning(f"Code {code} not found in pending_codes")
+            logger.warning(f"Code {code} not found in pending_codes for discord_id {discord_id}")
             return None
         code_data = pending_codes[code]
-        if code_data["discord_id"] != discord_id or time.time() > code_data["expiry"]:
-            logger.warning(f"Code {code} invalid or expired for discord_id {discord_id}")
+        if code_data["discord_id"] != discord_id:
+            logger.warning(f"Code {code} does not match discord_id {discord_id}")
+            return None
+        if time.time() > code_data["expiry"]:
+            logger.warning(f"Code {code} expired for discord_id {discord_id}")
             del pending_codes[code]
+            save_linked_accounts()
             return None
         download_token = code_data["download_token"]
         
-        # Store in linked_accounts.json after verification
+        # Store in linked_accounts.json
         linked_accounts["generated_codes"][code] = {
             "discord_id": discord_id,
             "expiry": code_data["expiry"],
@@ -199,7 +206,7 @@ async def verify_code(code: str, discord_id: str) -> Optional[str]:
         logger.info(f"Code {code} verified and stored for discord_id {discord_id}")
         return download_token
     except Exception as e:
-        logger.error(f"Error in verify_code: {e}")
+        logger.error(f"Error in verify_code for code {code}, discord_id {discord_id}: {str(e)}")
         return None
 
 async def invalidate_user_codes(discord_id: str):
@@ -208,6 +215,7 @@ async def invalidate_user_codes(discord_id: str):
         codes_to_remove = [code for code, data in pending_codes.items() if data["discord_id"] == discord_id]
         for code in codes_to_remove:
             del pending_codes[code]
+            logger.info(f"Removed pending code {code} for discord_id {discord_id}")
         # Remove from linked_accounts
         codes_to_remove = [code for code, data in linked_accounts["generated_codes"].items() if data["discord_id"] == discord_id]
         for code in codes_to_remove:
@@ -217,7 +225,7 @@ async def invalidate_user_codes(discord_id: str):
         save_linked_accounts()
         logger.info(f"Invalidated codes for discord_id {discord_id}")
     except Exception as e:
-        logger.error(f"Error in invalidate_user_codes: {e}")
+        logger.error(f"Error in invalidate_user_codes for discord_id {discord_id}: {e}")
 
 # ------------------- Discord Bot Commands -------------------
 
@@ -250,22 +258,31 @@ async def link_account(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         logger.info(f"link-account called by discord_id {discord_id} in guild {interaction.guild.id}")
     except Exception as e:
-        logger.error(f"Error in link_account: {e}")
+        logger.error(f"Error in link_account for discord_id {discord_id}: {e}")
         embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="verify-code", description="Verify your code to receive the download link (Supporter role required).")
 async def verify_code(interaction: discord.Interaction, code: str):
     try:
+        await interaction.response.defer(ephemeral=True)  # Defer to avoid timeout
         discord_id = str(interaction.user.id)
         embed = discord.Embed(color=discord.Color.blue())
 
         # Check if user is in the guild and has Supporter role
+        if not interaction.guild:
+            embed.title = "❌ Invalid Context"
+            embed.description = "This command must be run in a server."
+            embed.color = discord.Color.red()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            logger.info(f"verify-code denied for discord_id {discord_id}: no guild context")
+            return
+
         if not has_supporter_role(interaction.user):
             embed.title = "❌ Permission Denied"
             embed.description = f"You need the '{SUPPORTER_ROLE_NAME}' role in this server to use this command."
             embed.color = discord.Color.red()
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             logger.info(f"verify-code denied for discord_id {discord_id}: no Supporter role")
             return
 
@@ -275,7 +292,7 @@ async def verify_code(interaction: discord.Interaction, code: str):
             embed.title = "❌ Invalid or Expired Code"
             embed.description = "The code is invalid or has expired. Run the terminal app to generate a new code and try again."
             embed.color = discord.Color.red()
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             logger.info(f"verify-code failed for discord_id {discord_id}: invalid or expired code {code}")
             return
 
@@ -287,12 +304,12 @@ async def verify_code(interaction: discord.Interaction, code: str):
             f"This link is valid for 5 minutes. Paste it into the terminal app to download and run the application."
         )
         embed.color = discord.Color.green()
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"verify-code successful for discord_id {discord_id}, code {code} in guild {interaction.guild.id}")
     except Exception as e:
-        logger.error(f"Error in verify_code command: {e}")
-        embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        logger.error(f"Error in verify_code command for discord_id {discord_id}, code {code}: {str(e)}")
+        embed = discord.Embed(title="❌ Error", description="An error occurred while verifying the code. Please try again or contact an admin.", color=discord.Color.red())
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="change-account", description="Unlink your current device and link a new one (Supporter role required).")
 async def change_account(interaction: discord.Interaction):
@@ -324,7 +341,7 @@ async def change_account(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         logger.info(f"change-account successful for discord_id {discord_id} in guild {interaction.guild.id}")
     except Exception as e:
-        logger.error(f"Error in change_account: {e}")
+        logger.error(f"Error in change_account for discord_id {discord_id}: {e}")
         embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -363,7 +380,7 @@ async def link_roblox(interaction: discord.Interaction, username: str):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         logger.info(f"link-roblox called by discord_id {discord_id}, username {username}")
     except Exception as e:
-        logger.error(f"Error in link_roblox: {e}")
+        logger.error(f"Error in link_roblox for discord_id {discord_id}: {e}")
         embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -391,7 +408,7 @@ async def unlink_roblox(interaction: discord.Interaction):
             embed = discord.Embed(title="❌ No Account Linked", description="You don't have any Roblox account linked.", color=discord.Color.red())
             await interaction.response.send_message(embed=embed, ephemeral=True)
     except Exception as e:
-        logger.error(f"Error in unlink_roblox: {e}")
+        logger.error(f"Error in unlink_roblox for discord_id {discord_id}: {e}")
         embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -435,7 +452,7 @@ async def claim_roles(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         logger.info(f"claim-roles called by discord_id {discord_id}")
     except Exception as e:
-        logger.error(f"Error in claim_roles: {e}")
+        logger.error(f"Error in claim_roles for discord_id {discord_id}: {e}")
         embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -455,7 +472,7 @@ async def list_linked(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         logger.info(f"list-linked called by discord_id {str(interaction.user.id)}")
     except Exception as e:
-        logger.error(f"Error in list_linked: {e}")
+        logger.error(f"Error in list_linked for discord_id {str(interaction.user.id)}: {e}")
         embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -484,7 +501,7 @@ async def force_link(interaction: discord.Interaction, discord_user: discord.Use
         await interaction.response.send_message(f"✅ Force linked {discord_user.mention} to `{roblox_username}`", ephemeral=True)
         logger.info(f"force-link called by discord_id {str(interaction.user.id)}, linked {discord_id} to {roblox_username}")
     except Exception as e:
-        logger.error(f"Error in force_link: {e}")
+        logger.error(f"Error in force_link for discord_id {str(interaction.user.id)}: {e}")
         embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -509,7 +526,7 @@ async def admin_unlink(interaction: discord.Interaction, discord_user: discord.U
         else:
             await interaction.response.send_message("❌ User is not linked.", ephemeral=True)
     except Exception as e:
-        logger.error(f"Error in admin_unlink: {e}")
+        logger.error(f"Error in admin_unlink for discord_id {str(interaction.user.id)}: {e}")
         embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -523,7 +540,7 @@ async def remove_gamepass_roles(member: discord.Member):
             await member.remove_roles(*roles_to_remove)
             logger.info(f"Removed gamepass roles from {member.id}")
     except Exception as e:
-        logger.error(f"Error in remove_gamepass_roles: {e}")
+        logger.error(f"Error in remove_gamepass_roles for member {member.id}: {e}")
 
 # ------------------- Render Backend Webserver -------------------
 
@@ -543,10 +560,17 @@ async def handle_redeem(request):
             "expiry": expiry,
             "download_token": download_token
         }
-        logger.info(f"Stored pending code {code} for discord_id {discord_id}")
+        # Persist to linked_accounts.json immediately to survive restarts
+        linked_accounts["generated_codes"][code] = {
+            "discord_id": discord_id,
+            "expiry": expiry,
+            "download_token": download_token
+        }
+        save_linked_accounts()
+        logger.info(f"Stored code {code} for discord_id {discord_id} in /redeem")
         return web.json_response({"message": "Code stored successfully"})
     except Exception as e:
-        logger.error(f"Error in handle_redeem: {e}")
+        logger.error(f"Error in handle_redeem: {str(e)}")
         return web.json_response({"error": "Server error"}, status=500)
 
 async def handle_download(request):
@@ -569,7 +593,7 @@ async def handle_download(request):
         logger.warning(f"Invalid or expired token in /download: {token}")
         return web.json_response({"error": "Invalid or expired token"}, status=401)
     except Exception as e:
-        logger.error(f"Error in handle_download: {e}")
+        logger.error(f"Error in handle_download: {str(e)}")
         return web.json_response({"error": "Server error"}, status=500)
 
 async def run_webserver():
@@ -609,4 +633,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except Exception as e:
         logger.error(f"Error in main: {e}")
-
