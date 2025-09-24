@@ -21,14 +21,15 @@ CONFIG_FILE = "config.json"
 ADMIN_ROLE_NAME = "Admin"
 SUPPORTER_ROLE_NAME = "Supporter"
 OWNER_ID = 1322627642746339432
-BACKEND_URL = "https://backend-2-0-9uod.onrender.com/redeem"  # Replace with your actual endpoint
 ROBLOX_API_URL = "https://inventory.roblox.com/v1/users/{user_id}/items/GamePass/{gamepass_id}"
+DOWNLOAD_URL = "/download"  # Relative path for Render server
+ZIP_FILE_PATH = "secure_downloads/app.zip"  # Secret folder on Render
 
 # Rate limiting and caching
 roblox_cache: Dict[str, Dict] = {}
 cache_expiry = 300  # 5 minutes cache
 last_request_time = 0
-min_request_interval = 1.0  # Minimum time between Roblox API requests
+min_request_interval = 1.0
 
 # ------------------- Load Config & Accounts -------------------
 
@@ -51,7 +52,8 @@ try:
                 "discord_to_roblox": discord_to_roblox,
                 "roblox_to_discord": roblox_to_discord,
                 "force_linked_users": [],
-                "generated_codes": {}
+                "generated_codes": {},
+                "linked_devices": {}
             }
         else:
             linked_accounts = temp_accounts
@@ -59,14 +61,20 @@ try:
                 linked_accounts["force_linked_users"] = []
             if "generated_codes" not in linked_accounts:
                 linked_accounts["generated_codes"] = {}
+            if "linked_devices" not in linked_accounts:
+                linked_accounts["linked_devices"] = {}
 except FileNotFoundError:
-    linked_accounts = {"discord_to_roblox": {}, "roblox_to_discord": {}, "force_linked_users": [], "generated_codes": {}}
-
+    linked_accounts = {
+        "discord_to_roblox": {},
+        "roblox_to_discord": {},
+        "force_linked_users": [],
+        "generated_codes": {},
+        "linked_devices": {}
+    }
 
 def save_linked_accounts():
     with open(linked_accounts_file, "w") as f:
         json.dump(linked_accounts, f, indent=2)
-
 
 def is_admin(interaction: discord.Interaction) -> bool:
     role = discord.utils.get(interaction.guild.roles, name=ADMIN_ROLE_NAME)
@@ -74,38 +82,28 @@ def is_admin(interaction: discord.Interaction) -> bool:
         return False
     return (role in interaction.user.roles) or (interaction.user.id == OWNER_ID)
 
-
 def has_supporter_role(member: discord.Member) -> bool:
     role = discord.utils.get(member.guild.roles, name=SUPPORTER_ROLE_NAME)
     return role in member.roles if role else False
 
-
 # ------------------- Rate Limited API Calls -------------------
 
 async def rate_limited_request():
-    """Ensure we don't make requests too frequently"""
     global last_request_time
     current_time = time.time()
     elapsed = current_time - last_request_time
-    
     if elapsed < min_request_interval:
         await asyncio.sleep(min_request_interval - elapsed)
-    
     last_request_time = time.time()
 
-
 async def get_roblox_user_id(username: str) -> Optional[int]:
-    """Get Roblox user ID with caching and rate limiting"""
-    # Check cache first
     cache_key = f"user_{username}"
     if cache_key in roblox_cache:
         cached_data = roblox_cache[cache_key]
         if time.time() - cached_data["timestamp"] < cache_expiry:
             return cached_data["data"]
     
-    # Rate limit our requests
     await rate_limited_request()
-    
     url = "https://users.roblox.com/v1/usernames/users"
     try:
         async with aiohttp.ClientSession() as session:
@@ -114,34 +112,27 @@ async def get_roblox_user_id(username: str) -> Optional[int]:
                     user_data = await response.json()
                     if user_data["data"]:
                         user_id = user_data["data"][0]["id"]
-                        # Cache the result
                         roblox_cache[cache_key] = {
                             "data": user_id,
                             "timestamp": time.time()
                         }
                         return user_id
-                elif response.status == 429:  # Rate limited
+                elif response.status == 429:
                     retry_after = int(response.headers.get("Retry-After", 5))
                     await asyncio.sleep(retry_after)
-                    return await get_roblox_user_id(username)  # Retry
+                    return await get_roblox_user_id(username)
     except (aiohttp.ClientError, asyncio.TimeoutError):
         pass
-    
     return None
 
-
 async def has_gamepass(user_id: int, gamepass_id: int) -> bool:
-    """Check if user has gamepass with caching and rate limiting"""
-    # Check cache first
     cache_key = f"gamepass_{user_id}_{gamepass_id}"
     if cache_key in roblox_cache:
         cached_data = roblox_cache[cache_key]
         if time.time() - cached_data["timestamp"] < cache_expiry:
             return cached_data["data"]
     
-    # Rate limit our requests
     await rate_limited_request()
-    
     url = ROBLOX_API_URL.format(user_id=user_id, gamepass_id=gamepass_id)
     try:
         async with aiohttp.ClientSession() as session:
@@ -149,23 +140,158 @@ async def has_gamepass(user_id: int, gamepass_id: int) -> bool:
                 if response.status == 200:
                     gamepasses = await response.json()
                     has_pass = bool(gamepasses.get("data", []))
-                    # Cache the result
                     roblox_cache[cache_key] = {
                         "data": has_pass,
                         "timestamp": time.time()
                     }
                     return has_pass
-                elif response.status == 429:  # Rate limited
+                elif response.status == 429:
                     retry_after = int(response.headers.get("Retry-After", 5))
                     await asyncio.sleep(retry_after)
-                    return await has_gamepass(user_id, gamepass_id)  # Retry
+                    return await has_gamepass(user_id, gamepass_id)
     except (aiohttp.ClientError, asyncio.TimeoutError):
         pass
-    
     return False
 
+# ------------------- Code Generation and Verification -------------------
 
-# ------------------- Discord Bot Commands -------------------
+async def generate_code(discord_id: str) -> tuple[str, str]:
+    code = secrets.token_urlsafe(16)
+    expiry = (datetime.utcnow() + timedelta(minutes=5)).timestamp()
+    download_token = secrets.token_urlsafe(16)
+    linked_accounts["generated_codes"][code] = {
+        "discord_id": discord_id,
+        "expiry": expiry,
+        "download_token": download_token
+    }
+    save_linked_accounts()
+    return code, download_token
+
+async def verify_code(code: str, discord_id: str) -> Optional[str]:
+    if code not in linked_accounts["generated_codes"]:
+        return None
+    code_data = linked_accounts["generated_codes"][code]
+    if code_data["discord_id"] != discord_id or time.time() > code_data["expiry"]:
+        del linked_accounts["generated_codes"][code]
+        save_linked_accounts()
+        return None
+    download_token = code_data["download_token"]
+    del linked_accounts["generated_codes"][code]
+    save_linked_accounts()
+    return download_token
+
+async def invalidate_user_codes(discord_id: str):
+    codes_to_remove = [code for code, data in linked_accounts["generated_codes"].items() if data["discord_id"] == discord_id]
+    for code in codes_to_remove:
+        del linked_accounts["generated_codes"][code]
+    save_linked_accounts()
+
+# ------------------- New Discord Bot Commands -------------------
+
+@bot.tree.command(name="link-account", description="Link your account to download the application (Supporter role required).")
+async def link_account(interaction: discord.Interaction):
+    discord_id = str(interaction.user.id)
+    embed = discord.Embed(color=discord.Color.blue())
+
+    if not has_supporter_role(interaction.user):
+        embed.title = "❌ Permission Denied"
+        embed.description = f"You need the '{SUPPORTER_ROLE_NAME}' role to use this command."
+        embed.color = discord.Color.red()
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    if discord_id in linked_accounts["linked_devices"]:
+        embed.title = "❌ Already Linked"
+        embed.description = "Your account is already linked to a device. Use `/change-account` to link a new device."
+        embed.color = discord.Color.red()
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    code, _ = await generate_code(discord_id)
+    linked_accounts["linked_devices"][discord_id] = {"linked": True}
+    save_linked_accounts()
+
+    try:
+        await interaction.user.send(f"Your verification code is: `{code}`\nThis code expires in 5 minutes. Use `/verify-code <code>` to proceed.")
+        embed.title = "✅ Code Generated"
+        embed.description = "A verification code has been sent to your DMs. Please check and use `/verify-code` to verify."
+        embed.color = discord.Color.green()
+    except discord.Forbidden:
+        embed.title = "❌ DM Error"
+        embed.description = "I couldn't send you a DM. Please enable DMs from server members and try again."
+        embed.color = discord.Color.red()
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="verify-code", description="Verify your code to receive the download link (Supporter role required).")
+async def verify_code(interaction: discord.Interaction, code: str):
+    discord_id = str(interaction.user.id)
+    embed = discord.Embed(color=discord.Color.blue())
+
+    if not has_supporter_role(interaction.user):
+        embed.title = "❌ Permission Denied"
+        embed.description = f"You need the '{SUPPORTER_ROLE_NAME}' role to use this command."
+        embed.color = discord.Color.red()
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    download_token = await verify_code(code, discord_id)
+    if not download_token:
+        embed.title = "❌ Invalid or Expired Code"
+        embed.description = "The code is invalid or has expired. Please use `/link-account` to generate a new code."
+        embed.color = discord.Color.red()
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Get the base URL of the Render server dynamically
+    base_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'backend-2-0-9uod.onrender.com')}"
+    download_link = f"{base_url}{DOWNLOAD_URL}?token={download_token}"
+    embed.title = "✅ Code Verified"
+    embed.description = (
+        f"Download your file here: {download_link}\n"
+        f"This link is valid for 5 minutes."
+    )
+    embed.color = discord.Color.green()
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="change-account", description="Unlink your current device and link a new one (Supporter role required).")
+async def change_account(interaction: discord.Interaction):
+    discord_id = str(interaction.user.id)
+    embed = discord.Embed(color=discord.Color.blue())
+
+    if not has_supporter_role(interaction.user):
+        embed.title = "❌ Permission Denied"
+        embed.description = f"You need the '{SUPPORTER_ROLE_NAME}' role to use this command."
+        embed.color = discord.Color.red()
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    if discord_id not in linked_accounts["linked_devices"]:
+        embed.title = "❌ No Device Linked"
+        embed.description = "You haven't linked a device yet. Use `/link-account` to link one."
+        embed.color = discord.Color.red()
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    await invalidate_user_codes(discord_id)
+    del linked_accounts["linked_devices"][discord_id]
+    code, _ = await generate_code(discord_id)
+    linked_accounts["linked_devices"][discord_id] = {"linked": True}
+    save_linked_accounts()
+
+    try:
+        await interaction.user.send(f"Your new verification code is: `{code}`\nThis code expires in 5 minutes. Use `/verify-code <code>` to proceed.")
+        embed.title = "✅ Device Unlinked & New Code Generated"
+        embed.description = "Your previous device link has been removed. A new verification code has been sent to your DMs."
+        embed.color = discord.Color.green()
+    except discord.Forbidden:
+        embed.title = "❌ DM Error"
+        embed.description = "I couldn't send you a DM. Please enable DMs from server members and try again."
+        embed.color = discord.Color.red()
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ------------------- Existing Commands -------------------
 
 @bot.tree.command(name="link-roblox", description="Link your Roblox account to your Discord account.")
 async def link_roblox(interaction: discord.Interaction, username: str):
@@ -200,7 +326,6 @@ async def link_roblox(interaction: discord.Interaction, username: str):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-
 @bot.tree.command(name="unlink-roblox", description="Unlink your Roblox account from your Discord account.")
 async def unlink_roblox(interaction: discord.Interaction):
     discord_id = str(interaction.user.id)
@@ -223,7 +348,6 @@ async def unlink_roblox(interaction: discord.Interaction):
         embed = discord.Embed(title="❌ No Account Linked", description="You don't have any Roblox account linked.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-
 @bot.tree.command(name="claim-roles", description="Claim your roles based on your Roblox gamepasses.")
 async def claim_roles(interaction: discord.Interaction):
     embed = discord.Embed(color=discord.Color.blue())
@@ -237,7 +361,6 @@ async def claim_roles(interaction: discord.Interaction):
         return
 
     roblox_id = linked_accounts["discord_to_roblox"][discord_id]
-
     added_roles = []
 
     for mapping in config["gamepass_roles"]:
@@ -263,9 +386,6 @@ async def claim_roles(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-
-# ------------------- Admin Commands -------------------
-
 @bot.tree.command(name="list-linked", description="(Admin) List all linked accounts.")
 @app_commands.checks.has_role(ADMIN_ROLE_NAME)
 async def list_linked(interaction: discord.Interaction):
@@ -279,7 +399,6 @@ async def list_linked(interaction: discord.Interaction):
 
     embed = discord.Embed(title="🔗 Linked Accounts", description=description or "None found.", color=discord.Color.blue())
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 @bot.tree.command(name="force-link", description="(Admin) Force link a user to a Roblox username.")
 @app_commands.checks.has_role(ADMIN_ROLE_NAME)
@@ -304,7 +423,6 @@ async def force_link(interaction: discord.Interaction, discord_user: discord.Use
     save_linked_accounts()
     await interaction.response.send_message(f"✅ Force linked {discord_user.mention} to `{roblox_username}`", ephemeral=True)
 
-
 @bot.tree.command(name="admin-unlink", description="(Admin) Unlink a user manually.")
 @app_commands.checks.has_role(ADMIN_ROLE_NAME)
 async def admin_unlink(interaction: discord.Interaction, discord_user: discord.User):
@@ -324,7 +442,6 @@ async def admin_unlink(interaction: discord.Interaction, discord_user: discord.U
     else:
         await interaction.response.send_message("❌ User is not linked.", ephemeral=True)
 
-
 # ------------------- Helper Functions -------------------
 
 async def remove_gamepass_roles(member: discord.Member):
@@ -333,6 +450,50 @@ async def remove_gamepass_roles(member: discord.Member):
     if roles_to_remove:
         await member.remove_roles(*roles_to_remove)
 
+# ------------------- Render Backend Webserver -------------------
+
+async def handle_redeem(request):
+    data = await request.json()
+    code = data.get("code")
+    discord_id = data.get("discord_id")
+    if not code or not discord_id:
+        return web.json_response({"error": "Missing code or discord_id"}, status=400)
+
+    download_token = await verify_code(code, discord_id)
+    if not download_token:
+        return web.json_response({"error": "Invalid or expired code"}, status=401)
+
+    base_url = f"https://{request.host}"
+    return web.json_response({
+        "download_link": f"{base_url}{DOWNLOAD_URL}?token={download_token}"
+    })
+
+async def handle_download(request):
+    token = request.query.get("token")
+    if not token:
+        return web.json_response({"error": "Missing token"}, status=400)
+
+    for code, data in linked_accounts["generated_codes"].items():
+        if data.get("download_token") == token and time.time() < data["expiry"]:
+            if not os.path.exists(ZIP_FILE_PATH):
+                return web.json_response({"error": "File not found"}, status=404)
+            return web.FileResponse(ZIP_FILE_PATH, headers={
+                "Content-Disposition": "attachment; filename=app.zip"
+            })
+    
+    return web.json_response({"error": "Invalid or expired token"}, status=401)
+
+async def run_webserver():
+    app = web.Application()
+    app.router.add_get('/', lambda r: web.Response(text="Bot is running"))
+    app.router.add_post('/redeem', handle_redeem)
+    app.router.add_get('/download', handle_download)
+    port = int(os.environ.get("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"🌐 Web server running on port {port}")
 
 # ------------------- Events -------------------
 
@@ -341,29 +502,11 @@ async def on_ready():
     await bot.tree.sync()
     print(f"✅ Logged in as {bot.user}")
 
-
-# ------------------- Minimal Webserver -------------------
-
-async def handle(request):
-    return web.Response(text="Bot is running")
-
-async def run_webserver():
-    app = web.Application()
-    app.router.add_get('/', handle)
-    port = int(os.environ.get("PORT", 8080))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    print(f"🌐 Web server running on port {port}")
-
-
 # ------------------- Run Bot & Webserver -------------------
 
 async def main():
     await run_webserver()
     await bot.start(os.getenv("DISCORD_TOKEN"))
-
 
 if __name__ == "__main__":
     load_dotenv()
