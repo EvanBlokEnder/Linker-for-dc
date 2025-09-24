@@ -178,7 +178,7 @@ async def has_gamepass(user_id: int, gamepass_id: int) -> bool:
 
 # ------------------- Code Verification -------------------
 
-async def verify_code(code: str, discord_id: str) -> Optional[str]:
+async def verify_code_internal(code: str, discord_id: str) -> Optional[str]:
     try:
         if code not in pending_codes:
             logger.warning(f"Code {code} not found in pending_codes for discord_id {discord_id}")
@@ -206,7 +206,7 @@ async def verify_code(code: str, discord_id: str) -> Optional[str]:
         logger.info(f"Code {code} verified and stored for discord_id {discord_id}")
         return download_token
     except Exception as e:
-        logger.error(f"Error in verify_code for code {code}, discord_id {discord_id}: {str(e)}")
+        logger.error(f"Error in verify_code_internal for code {code}, discord_id {discord_id}: {str(e)}")
         return None
 
 async def invalidate_user_codes(discord_id: str):
@@ -287,7 +287,8 @@ async def verify_code(interaction: discord.Interaction, code: str):
             return
 
         # Verify code
-        download_token = await verify_code(code, discord_id)
+        logger.info(f"Attempting to verify code {code} for discord_id {discord_id}")
+        download_token = await verify_code_internal(code, discord_id)
         if not download_token:
             embed.title = "❌ Invalid or Expired Code"
             embed.description = "The code is invalid or has expired. Run the terminal app to generate a new code and try again."
