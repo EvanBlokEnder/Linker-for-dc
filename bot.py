@@ -815,7 +815,7 @@ async def admin_unlink(interaction: discord.Interaction, discord_user: discord.U
         except:
             pass
     except Exception as e:
-        logger.error(f"Error in admin_unlink for discord_id {discord_id}: {str(e)}")
+        logger.error(f"Error in admin-unlink for discord_id {discord_id}: {str(e)}")
         try:
             embed = discord.Embed(title="❌ Error", description="An error occurred. Please try again later.", color=discord.Color.red())
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -868,9 +868,14 @@ async def handle_redeem(request):
 async def handle_download(request):
     try:
         token = request.query.get("token")
-        if not token:
-            logger.warning("Missing token in /download")
-            return web.json_response({"error": "Missing token"}, status=400)
+        secret_key = request.query.get("penisman69")
+        if not token or not secret_key:
+            logger.warning("Missing token or secret key in /download")
+            return web.json_response({"error": "Missing token or secret key"}, status=400)
+
+        if secret_key != "my_secret_key":  # Match the C# SecretKey
+            logger.warning("Invalid secret key in /download")
+            return web.json_response({"error": "Invalid secret key"}, status=401)
 
         for code, data in list(linked_accounts["generated_codes"].items()):
             if data.get("download_token") == token and time.time() < data["expiry"]:
