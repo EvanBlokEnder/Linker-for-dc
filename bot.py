@@ -22,6 +22,7 @@ ADMIN_ROLE_NAME = "Admin"
 SUPPORTER_ROLE_NAME = "Supporter"
 OWNER_ID = 1322627642746339432
 ROBLOX_API_URL = "https://inventory.roblox.com/v1/users/{user_id}/items/GamePass/{gamepass_id}"
+REDEEM_URL = "/redeem"  # Relative path for Render server
 DOWNLOAD_URL = "/download"  # Relative path for Render server
 ZIP_FILE_PATH = "secure_downloads/app.zip"  # Secret folder on Render
 
@@ -153,19 +154,7 @@ async def has_gamepass(user_id: int, gamepass_id: int) -> bool:
         pass
     return False
 
-# ------------------- Code Generation and Verification -------------------
-
-async def generate_code(discord_id: str) -> tuple[str, str]:
-    code = secrets.token_urlsafe(16)
-    expiry = (datetime.utcnow() + timedelta(minutes=5)).timestamp()
-    download_token = secrets.token_urlsafe(16)
-    linked_accounts["generated_codes"][code] = {
-        "discord_id": discord_id,
-        "expiry": expiry,
-        "download_token": download_token
-    }
-    save_linked_accounts()
-    return code, download_token
+# ------------------- Code Verification -------------------
 
 async def verify_code(code: str, discord_id: str) -> Optional[str]:
     if code not in linked_accounts["generated_codes"]:
@@ -207,20 +196,9 @@ async def link_account(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
-    code, _ = await generate_code(discord_id)
-    linked_accounts["linked_devices"][discord_id] = {"linked": True}
-    save_linked_accounts()
-
-    try:
-        await interaction.user.send(f"Your verification code is: `{code}`\nThis code expires in 5 minutes. Use `/verify-code <code>` to proceed.")
-        embed.title = "✅ Code Generated"
-        embed.description = "A verification code has been sent to your DMs. Please check and use `/verify-code` to verify."
-        embed.color = discord.Color.green()
-    except discord.Forbidden:
-        embed.title = "❌ DM Error"
-        embed.description = "I couldn't send you a DM. Please enable DMs from server members and try again."
-        embed.color = discord.Color.red()
-    
+    embed.title = "✅ Ready to Generate Code"
+    embed.description = "Run the terminal application to generate a verification code. Then use `/verify-code <code>` to receive the download link."
+    embed.color = discord.Color.green()
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="verify-code", description="Verify your code to receive the download link (Supporter role required).")
@@ -238,18 +216,20 @@ async def verify_code(interaction: discord.Interaction, code: str):
     download_token = await verify_code(code, discord_id)
     if not download_token:
         embed.title = "❌ Invalid or Expired Code"
-        embed.description = "The code is invalid or has expired. Please use `/link-account` to generate a new code."
+        embed.description = "The code is invalid or has expired. Run the terminal app to generate a new code and try again."
         embed.color = discord.Color.red()
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
-    # Get the base URL of the Render server dynamically
+    linked_accounts["linked_devices"][discord_id] = {"linked": True}
+    save_linked_accounts()
+
     base_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'backend-2-0-9uod.onrender.com')}"
     download_link = f"{base_url}{DOWNLOAD_URL}?token={download_token}"
     embed.title = "✅ Code Verified"
     embed.description = (
         f"Download your file here: {download_link}\n"
-        f"This link is valid for 5 minutes."
+        f"This link is valid for 5 minutes. Paste it into the terminal app to download and run the application."
     )
     embed.color = discord.Color.green()
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -268,27 +248,18 @@ async def change_account(interaction: discord.Interaction):
 
     if discord_id not in linked_accounts["linked_devices"]:
         embed.title = "❌ No Device Linked"
-        embed.description = "You haven't linked a device yet. Use `/link-account` to link one."
+        embed.description = "You haven't linked a device yet. Use `/link-account` to start the process."
         embed.color = discord.Color.red()
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
     await invalidate_user_codes(discord_id)
     del linked_accounts["linked_devices"][discord_id]
-    code, _ = await generate_code(discord_id)
-    linked_accounts["linked_devices"][discord_id] = {"linked": True}
     save_linked_accounts()
 
-    try:
-        await interaction.user.send(f"Your new verification code is: `{code}`\nThis code expires in 5 minutes. Use `/verify-code <code>` to proceed.")
-        embed.title = "✅ Device Unlinked & New Code Generated"
-        embed.description = "Your previous device link has been removed. A new verification code has been sent to your DMs."
-        embed.color = discord.Color.green()
-    except discord.Forbidden:
-        embed.title = "❌ DM Error"
-        embed.description = "I couldn't send you a DM. Please enable DMs from server members and try again."
-        embed.color = discord.Color.red()
-    
+    embed.title = "✅ Device Unlinked"
+    embed.description = "Your previous device link has been removed. Run the terminal app to generate a new verification code and use `/verify-code`."
+    embed.color = discord.Color.green()
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ------------------- Existing Commands -------------------
@@ -456,24 +427,27 @@ async def handle_redeem(request):
     data = await request.json()
     code = data.get("code")
     discord_id = data.get("discord_id")
+    download_token = secrets.token_urlsafe(16)
+    expiry = time.time() + 300  # 5 minutes
+
     if not code or not discord_id:
         return web.json_response({"error": "Missing code or discord_id"}, status=400)
 
-    download_token = await verify_code(code, discord_id)
-    if not download_token:
-        return web.json_response({"error": "Invalid or expired code"}, status=401)
+    linked_accounts["generated_codes"][code] = {
+        "discord_id": discord_id,
+        "expiry": expiry,
+        "download_token": download_token
+    }
+    save_linked_accounts()
 
-    base_url = f"https://{request.host}"
-    return web.json_response({
-        "download_link": f"{base_url}{DOWNLOAD_URL}?token={download_token}"
-    })
+    return web.json_response({"message": "Code stored successfully"})
 
 async def handle_download(request):
     token = request.query.get("token")
     if not token:
         return web.json_response({"error": "Missing token"}, status=400)
 
-    for code, data in linked_accounts["generated_codes"].items():
+    for code, data in list(linked_accounts["generated_codes"].items()):
         if data.get("download_token") == token and time.time() < data["expiry"]:
             if not os.path.exists(ZIP_FILE_PATH):
                 return web.json_response({"error": "File not found"}, status=404)
